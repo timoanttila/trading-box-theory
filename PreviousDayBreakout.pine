@@ -1,0 +1,201 @@
+// This script plots previous day's high, low, mid, and open levels,
+// tracks price bounces and breakouts from these levels, signals
+// trend reversals or breakouts with shapes, and sets alerts for
+// these events.
+// © Timo Anttila, Tuspe Design Oy
+//@version=6
+indicator("Previous Day's Candle Breakouts and Bounces [timoanttila]", shorttitle="PDB", overlay=true)
+
+// ----------
+//  SETTINGS
+// ----------
+
+line_and_text_color = color.new(color.white, 50)
+pd_active = timeframe.in_seconds() <= 14400
+buffer_perc_input = input.float(5.0, "PDH/PDL Buffer %", step=0.5, minval=0.0)
+buffer_perc = buffer_perc_input / 100.0
+
+n_bars = input.int(defval=4, title="Number of clearing bars", minval=1, maxval=20)
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95)
+
+// ----------
+//  DAILY LEVELS
+// ----------
+
+new_day = dayofmonth != dayofmonth[1]
+[dh, dl, d_open] = request.security(syminfo.tickerid, "D", [high[1], low[1], open], lookahead=barmerge.lookahead_on)
+mid = (dh + dl) / 2
+day_range = dh - dl
+
+pdh_upper = dh
+pdh_lower = dh - day_range * buffer_perc
+pdl_lower = dl
+pdl_upper = dl + day_range * buffer_perc
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+int bounce_signal = 0
+int break_signal = 0
+var bool bounce_complete = false
+var bool break_complete = false
+var float last_bounce_value = 0
+var float pullback_value = 0
+var int bounce_direction = 0
+var int break_direction = 0
+var bool bounce_exited_buffer = false
+var label text_high = na
+var label text_low = na
+var label text_mid = na
+var label text_open = na
+var line line_high = na
+var line line_low = na
+var line line_mid = na
+var line line_open = na
+var line line_pdh_buf = na
+var line line_pdl_buf = na
+
+// ----------
+//  LINES
+// ----------
+
+if pd_active and new_day
+    bounce_complete := false
+    bounce_direction := 0
+    bounce_signal := 0
+    break_complete := false
+    break_direction := 0
+    break_signal := 0
+    pullback_value := 0
+
+    if not na(line_high)
+        line.delete(line_high), label.delete(text_high)
+    if not na(line_low)
+        line.delete(line_low), label.delete(text_low)
+    if not na(line_mid)
+        line.delete(line_mid), label.delete(text_mid)
+    if not na(line_open)
+        line.delete(line_open), label.delete(text_open)
+    if not na(line_pdh_buf)
+        line.delete(line_pdh_buf)
+    if not na(line_pdl_buf)
+        line.delete(line_pdl_buf)
+
+    end_bar = bar_index + 5
+    transparent = color.new(line_and_text_color, 100)
+
+    line_high := line.new(bar_index, dh, end_bar, dh, color=line_and_text_color)
+    line_low := line.new(bar_index, dl, end_bar, dl, color=line_and_text_color)
+    line_mid := line.new(bar_index, mid, end_bar, mid, color=color.new(color.orange, 50), style=line.style_dashed)
+    line_open := line.new(bar_index, d_open, end_bar, d_open, color=color.new(color.teal, 50))
+    line_pdh_buf := line.new(bar_index, pdh_lower, end_bar, pdh_lower, color=color.new(color.gray, 70), style=line.style_dashed)
+    line_pdl_buf := line.new(bar_index, pdl_upper, end_bar, pdl_upper, color=color.new(color.gray, 70), style=line.style_dashed)
+
+    text_high := label.new(end_bar, dh, "PDH", style=label.style_label_left, textcolor=line_and_text_color, size=size.small, color=transparent)
+    text_low := label.new(end_bar, dl, "PDL", style=label.style_label_left, textcolor=line_and_text_color, size=size.small, color=transparent)
+    text_mid := label.new(end_bar, mid, "50%", style=label.style_label_left, textcolor=color.orange, size=size.small, color=transparent)
+    text_open := label.new(end_bar, d_open, "DO", style=label.style_label_left, textcolor=color.teal, size=size.small, color=transparent)
+
+if pd_active
+    end_bar = bar_index + 5
+    if not na(line_high)
+        line.set_x2(line_high, end_bar), label.set_x(text_high, end_bar)
+    if not na(line_low)
+        line.set_x2(line_low, end_bar), label.set_x(text_low, end_bar)
+    if not na(line_mid)
+        line.set_x2(line_mid, end_bar), label.set_x(text_mid, end_bar)
+    if not na(line_open)
+        line.set_x2(line_open, end_bar), label.set_x(text_open, end_bar)
+    if not na(line_pdh_buf)
+        line.set_x2(line_pdh_buf, end_bar)
+    if not na(line_pdl_buf)
+        line.set_x2(line_pdl_buf, end_bar)
+
+// ----------
+//  CANDLE VALIDATION
+// ----------
+
+float candle_body = math.abs(close - open)
+float candle_full_size = math.abs(high - low)
+float prev_candle_body = math.abs(close[1] - open[1])
+bool candle_body_valid = (candle_body / candle_full_size) * 100 > min_body_perc
+
+float highest = ta.highest(high, n_bars)[1]
+float lowest = ta.lowest(low, n_bars)[1]
+
+// ----------
+//  SIGNAL CONDITIONS
+// ----------
+
+show_signals = time >= timenow - 2 * 86400000
+
+bool is_bear = close < open
+bool is_bear_bounce = ta.crossunder(close, pdh_lower) or (high > pdh_lower and low < pdh_lower)
+bool is_bear_break = ta.crossunder(close, dl) and is_bear
+bool is_bull = close > open
+bool is_bull_bounce = ta.crossover(close, pdl_upper) or (low < pdl_upper and high > pdl_upper)
+bool is_bull_break = ta.crossover(close, dh) and is_bull
+
+// int test_signal = 0
+
+if pd_active and show_signals
+    if is_bull_break or is_bear_break
+        break_complete := false
+        break_direction := is_bull_break ? 1 : 2
+        last_bounce_value := 0
+        pullback_value := 0
+
+    else if not break_complete and break_direction > 0
+        if candle_body_valid and pullback_value > 0 and ((break_direction == 1 and is_bull and close > pullback_value and close > highest) or (break_direction == 2 and is_bear and close < pullback_value and close < lowest))
+            break_complete := true
+            break_signal := break_direction
+            break_direction := 0
+            pullback_value := 0
+
+        else
+            if break_direction == 1 and is_bear and close > dh and (pullback_value == 0 or close < pullback_value)
+                pullback_value := high
+
+            else if break_direction == 2 and is_bull and close < dl and (pullback_value == 0 or close > pullback_value)
+                pullback_value := low
+
+    if close > dl and close < dh
+        if is_bear_bounce or is_bull_bounce
+            bounce_complete := false
+            bounce_direction := is_bull_bounce ? 1 : 2
+            break_direction := 0
+            bounce_exited_buffer := false
+
+        if not bounce_complete and bounce_direction > 0 and candle_body_valid
+            if bounce_direction == 1 and is_bull and close > pdl_upper and close > highest
+                bounce_signal := 1
+
+            else if bounce_direction == 2 and is_bear and close < pdh_lower and close < lowest
+                bounce_signal := 2
+
+            if bounce_signal > 0
+                bounce_complete := true
+                bounce_direction := 0
+
+// ----------
+//  PLOTSHAPES
+// ----------
+
+entry_color = color.new(color.white, 20)
+plotshape(break_signal == 1, title="Long Signal", location=location.belowbar, style=shape.diamond, size=size.tiny, color=entry_color)
+plotshape(break_signal == 2, title="Short Signal", location=location.abovebar, style=shape.diamond, size=size.tiny, color=entry_color)
+
+plotshape(bounce_signal == 1, title="Trend Reversal Bull", location=location.belowbar, style=shape.circle, size=size.tiny, color=entry_color)
+plotshape(bounce_signal == 2, title="Trend Reversal Bear", location=location.abovebar, style=shape.circle, size=size.tiny, color=entry_color)
+
+// plotshape(test_signal == 1, title="Test Bull", location=location.belowbar, style=shape.cross, size=size.tiny, color=entry_color)
+// plotshape(test_signal == 2, title="Test Bear", location=location.abovebar, style=shape.cross, size=size.tiny, color=entry_color)
+
+// ----------
+//  ALERTS
+// ----------
+
+alertcondition(break_signal > 0 or bounce_signal > 0, "Box Break or Bounce", "Asset broke out or bounced back.")
+alertcondition(break_signal > 0, "Box Break", "Asset broke out of the previous day's range.")
+alertcondition(bounce_signal > 0, "Box Bounce", "Asset tested PDH or PDL and bounced back.")
