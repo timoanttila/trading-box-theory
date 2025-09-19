@@ -1,0 +1,230 @@
+// A simple trend-following strategy using moving averages
+// MACD, RSI, VWAP and strong price action to generate
+// entry signals. Best for trending markets.
+// © timoanttila
+
+//@version=6
+indicator("Let's swing it! [timoanttila]", shorttitle="Swing", overlay=true)
+
+// ----------
+//  MOVING AVERAGES
+// ----------
+
+group1 = "Moving Averages"
+ma1_length = input.int(20, title="Short MA Length", maxval=50, minval=9, group=group1)
+ma1_type = input.string("SMA", title="Short MA Type", options=["SMA", "EMA"], group=group1)
+
+ma2_length = input.int(200, title="Long MA Length", maxval=300, minval=100, group=group1)
+ma2_type = input.string("SMA", title="Long MA Type", options=["SMA", "EMA"], group=group1)
+
+calculate_ma(ma_type, src, length) =>
+    ma_type == "SMA" ? ta.sma(src, length) : ta.ema(src, length)
+
+// Calculate the moving averages
+ma1 = calculate_ma(ma1_type, close, ma1_length)
+ma2 = calculate_ma(ma2_type, close, ma2_length)
+
+plot(ma1, color=color.yellow, linewidth=1, title="MA Short")
+plot(ma2, color=color.white, linewidth=2, title="MA Long")
+
+// ----------
+//  VWAP
+// ----------
+
+group2 = "Volume Weighted Average Price"
+vwap_anchor = input.string("Weekly", title="VWAP Anchor", options=["Session", "Weekly", "Monthly"], group=group2)
+use_vwap = input.bool(true, title="Use VWAP for trend (replaces MA Long)", group=group2)
+
+var float vwap_value = na
+if vwap_anchor == "Session"
+    vwap_value := ta.vwap(hlc3)
+else if vwap_anchor == "Weekly"
+    vwap_value := ta.vwap(hlc3, timeframe.change("1W"))
+else if vwap_anchor == "Monthly"
+    vwap_value := ta.vwap(hlc3, timeframe.change("1M"))
+
+plot(vwap_value, "VWAP", color=color.aqua, linewidth=2)
+
+// ----------
+//  MOMENTUM INDICATORS
+// ----------
+
+group3 = "Relative Strength Index"
+rsi_length = input.int(14, "RSI Length", minval=1, group=group3)
+rsi_oversold = input.int(25, "RSI Oversold", minval=1, maxval=50, group=group3)
+rsi_overbought = input.int(75, "RSI Overbought", minval=50, maxval=100, group=group3)
+rsi = ta.rsi(close, rsi_length)
+
+group4 = "Moving Average Convergence Divergence"
+macd_fast = input.int(12, "MACD Fast", minval=1, group=group4)
+macd_slow = input.int(26, "MACD Slow", minval=1, group=group4)
+macd_signal = input.int(9, "MACD Signal", minval=1, group=group4)
+[macd_line, signal_line, _] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// ATR for volatility
+atr = ta.atr(14)
+atr_ma = ta.sma(atr, 20)
+
+// ----------
+//  RISK MANAGEMENT
+// ----------
+
+group5 = "Risk Management"
+only_longs = input.bool(false, title="Only Longs trades", group=group5)
+use_trend_filter = input.bool(true, title="Filter signals by VWAP or MA", group=group5)
+max_entries = input.int(defval=4, title="Max entries per trend", minval=1, maxval=10, group=group5)
+n_bars = input.int(defval=5, title="Number of clearing bars", minval=1, maxval=20, group=group5)
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95, group=group5)
+
+line_and_text_color = color.new(color.white, 50)
+pd_active = timeframe.in_seconds() <= 14400
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+float main_long = use_vwap ? vwap_value : ma2
+int entry = 0
+int exit = 0
+int trend = 0
+var bool entry_taken = false
+var float entry_clear = 0
+var int trend_ma = 0
+var int trend_macd = 0
+var label text_high = na
+var label text_low = na
+var label text_mid = na
+var label text_open = na
+var line line_high = na
+var line line_low = na
+var line line_mid = na
+var line line_open = na
+
+// ----------
+//  DAILY LEVELS
+// ----------
+
+new_day = dayofmonth != dayofmonth[1]
+[dh, dl, d_open] = request.security(syminfo.tickerid, "D", [high[1], low[1], open], lookahead=barmerge.lookahead_on)
+mid = (dh + dl) / 2
+
+if pd_active and new_day
+    if not na(line_high)
+        line.delete(line_high), label.delete(text_high)
+    if not na(line_low)
+        line.delete(line_low), label.delete(text_low)
+    if not na(line_mid)
+        line.delete(line_mid), label.delete(text_mid)
+    if not na(line_open)
+        line.delete(line_open), label.delete(text_open)
+
+    end_bar = bar_index + 5
+    transparent = color.new(line_and_text_color, 100)
+
+    line_high := line.new(bar_index, dh, end_bar, dh, color=line_and_text_color)
+    line_low := line.new(bar_index, dl, end_bar, dl, color=line_and_text_color)
+    line_mid := line.new(bar_index, mid, end_bar, mid, color=color.new(color.orange, 50), style=line.style_dashed)
+    line_open := line.new(bar_index, d_open, end_bar, d_open, color=color.new(color.teal, 50))
+
+    text_high := label.new(end_bar, dh, "PDH", style=label.style_label_left, textcolor=line_and_text_color, size=size.small, color=transparent)
+    text_low := label.new(end_bar, dl, "PDL", style=label.style_label_left, textcolor=line_and_text_color, size=size.small, color=transparent)
+    text_mid := label.new(end_bar, mid, "50%", style=label.style_label_left, textcolor=color.orange, size=size.small, color=transparent)
+    text_open := label.new(end_bar, d_open, "DO", style=label.style_label_left, textcolor=color.teal, size=size.small, color=transparent)
+
+if pd_active
+    end_bar = bar_index + 5
+    if not na(line_high)
+        line.set_x2(line_high, end_bar), label.set_x(text_high, end_bar)
+    if not na(line_low)
+        line.set_x2(line_low, end_bar), label.set_x(text_low, end_bar)
+    if not na(line_mid)
+        line.set_x2(line_mid, end_bar), label.set_x(text_mid, end_bar)
+    if not na(line_open)
+        line.set_x2(line_open, end_bar), label.set_x(text_open, end_bar)
+
+// ----------
+//  TREND
+// ----------
+
+bool trend_macd_bull = ta.crossover(macd_line, signal_line)
+bool trend_macd_bear = ta.crossunder(macd_line, signal_line)
+
+if trend_macd_bull or trend_macd_bear
+    entry_taken := false
+
+    if trend_macd_bull and macd_line < 0
+        entry_clear := high
+        trend_macd := 1
+
+    else if trend_macd_bear and macd_line > 0
+        entry_clear := low
+        trend_macd := 2
+
+    else
+        trend_macd := 0
+
+bool trend_ok = false
+
+if trend_macd == 1
+    trend_ok := rsi > 50 and rsi < rsi_overbought and close > ma1 and (not use_trend_filter or close > main_long)
+
+else if trend_macd == 2
+    trend_ok := rsi < 50 and rsi > rsi_oversold and close < ma1 and (not use_trend_filter or close < main_long)
+
+if trend_ok and (not only_longs or trend_macd == 1)
+    trend := trend_macd
+
+bool base_cross_bull = ta.crossover(close, main_long)
+bool base_cross_bear = ta.crossunder(close, main_long)
+
+if use_trend_filter and (base_cross_bull or base_cross_bear)
+    entry_clear := base_cross_bull ? high : low
+    entry_taken := false
+    trend_ma := base_cross_bull ? 1 : 2
+
+    if trend_macd != trend_ma
+        trend_macd := trend_ma
+
+// ----------
+//  CANDLE VALIDATION
+// ----------
+
+candle_body = math.abs(close - open)
+candle_full_size = math.abs(high - low)
+prev_highest = ta.highest(high, n_bars)[1]
+prev_lowest = ta.lowest(low, n_bars)[1]
+
+atr_ok = atr <= atr_ma * 2 and atr >= atr_ma * 0.5
+candle_body_ok = (candle_body / candle_full_size) * 100 > min_body_perc
+candle_trend = trend == 1 ? is_bull and close > prev_highest and close > ma1 and (entry_clear == 0 or close > entry_clear) : is_bear and close < prev_lowest and close < ma1 and (entry_clear == 0 or close < entry_clear)
+candle_valid = candle_trend and candle_body_ok and atr_ok
+
+// ----------
+//  ENTRY
+// ----------
+
+if trend > 0 and not entry_taken and candle_valid
+    entry := trend
+    entry_taken := true
+
+// ----------
+//  ENTRY MARKERS
+// ----------
+
+loc_bear = location.abovebar
+loc_bull = location.belowbar
+plot_size = size.tiny
+
+color_entry = color.new(color.white, 20)
+plotshape(entry == 1, style=shape.triangleup, location=loc_bull, color=color_entry, size=plot_size, title="Bullish Entry")
+plotshape(entry == 2, style=shape.triangledown, location=loc_bear, color=color_entry, size=plot_size, title="Bearish Entry")
+
+// ----------
+//  ALERTS
+// ----------
+
+alertcondition(entry > 0, title="Entry", message="New signal. Happy trading!")
+alertcondition(entry == 1, title="Long Entry", message="New long signal. Happy trading!")
+alertcondition(entry == 2, title="Short Entry", message="New short signal. Happy trading!")
